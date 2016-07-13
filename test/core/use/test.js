@@ -1,12 +1,17 @@
 var assert = require('assert');
+let Test = require('../core_test');
 
 describe('.use()', function() {
     it('Should set predefined options in correct order', function() {
-        var config = this.Comb.getConfig('csscomb');
-        this.comb.configure(config);
-        var options = this.comb.getOptionsOrder();
+        let test = new Test(this);
+        var config = test.Comb.getConfig('csscomb');
+        test.comb.configure(config);
+        var options = test.comb.plugins.map(function(plugin) {
+            return plugin.name;
+        });
         var expected = [
           'always-semicolon',
+          'lines-between-rulesets',
           'remove-empty-rulesets',
           'color-case',
           'color-shorthand',
