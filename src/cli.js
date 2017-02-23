@@ -6,15 +6,15 @@
  * Usage example:
  * ./node_modules/.bin/csscomb [options] [file1 [dir1 [fileN [dirN]]]]
  */
-var format = require('./format');
 var fs = require('fs');
 var parseArgs = require('minimist');
 var path = require('path');
-var vow = require('vow');
-var Comb = require('./csscomb');
-var comb = new Comb();
 
-var getInputData = new vow.Promise(function(resolve) {
+var Comb = require('./csscomb');
+var Errors = require('./errors');
+
+
+var getInputData = new Promise(function(resolve) {
   var input = '';
   process.stdin.resume();
   process.stdin.setEncoding('utf8');
@@ -26,83 +26,74 @@ var getInputData = new vow.Promise(function(resolve) {
   });
 });
 
-function processInputData(input) {
-  try {
-    process.stdout.write(comb.processString(input));
-    process.exit(0);
-  } catch (e) {
-    process.stderr.write(e.message);
-    process.exit(1);
-  }
+var comb = new Comb();
+var options = getOptions();
+
+if (options.help) {
+  displayHelp();
+  process.exit(0);
 }
 
-function processSTDIN() {
-  getInputData.then(processInputData);
+if (options.detect) {
+  const config = detectConfig();
+  process.stdout.write(config);
+  process.exit(0);
 }
 
-function processFiles(files, config) {
-  vow.all(files.map(comb.processPath.bind(comb))).then(function(c) {
-    c = c.filter(function(isChanged) {
-      return isChanged !== undefined;
-    });
+var config = getConfig();
+comb.configure(config);
 
-    var tbchanged = c.reduce(function(a, b) {
-      return a + b;
-    }, 0);
-
-    var changed = config.lint ? 0 : tbchanged;
-
-    if (config.verbose) {
-      let message = `\n
-          ${c.length} file${c.length === 1 ? '' : 's'} processed\n
-          ${changed} file${changed === 1 ? '' : 's'} fixed\n`;
-      process.stdout.write(format(message));
-      console.timeEnd('Time spent');
-    }
-
-    if (config.lint && tbchanged) {
-      process.exit(1);
-    }
-
-    process.exit(0);
-  }).fail(function(e) {
-    process.stderr.write(e.stack);
-    process.exit(1);
-  });
+if (process.stdin.isTTY) {
+  processFiles(options._);
+} else {
+  processSTDIN();
 }
+
 
 function getOptions() {
   var parserOptions = {
-    boolean: ['verbose', 'lint'],
+    boolean: ['help', 'lint', 'verbose'],
     alias: {
       config: 'c',
       detect: 'd',
       lint: 'l',
+      help: 'h',
       verbose: 'v'
     }
   };
   return parseArgs(process.argv.slice(2), parserOptions);
 }
 
-function applyTemplate(config) {
-  if (!config.template) return;
-
-  if (!fs.existsSync(config.template)) {
-    let message = `Template configuration file ${config.template}
-                   was not found.`;
-    process.stderr.write(format(message));
-    process.exit(1);
-  }
-
-  var templateConfig = Comb.detectInFile(config.template);
-  for (var attrname in templateConfig) {
-    if (templateConfig.hasOwnProperty(attrname) && !config[attrname]) {
-      config[attrname] = templateConfig[attrname];
-    }
-  }
+function displayHelp() {
+  var help = [
+    'NAME',
+    '    csscomb — Lint and fix style errors in css files',
+    '',
+    'SYNOPSIS',
+    '    csscomb [options] file.css',
+    '    cat file.css | csscomb [options] -',
+    '',
+    'OPTIONS',
+    '    -c, --config [path]',
+    '        Path to configuration file.',
+    '    -d, --detect',
+    '        Run the tool in detect mode, returning detected options.',
+    '    -l, --lint',
+    '        Run the tool in linter mode, without modifying files.',
+    '    -h, --help',
+    '        Display help message.',
+    '    -v, --verbose',
+    '        Whether to print logging info.'
+  ];
+  process.stdout.write(help.join('\n'));
 }
 
-function getConfig(options) {
+function detectConfig() {
+  const config = Comb.detectInFile(options.detect);
+  return JSON.stringify(config, false, 4);
+}
+
+function getConfig() {
   var configPath = options.config &&
       path.resolve(process.cwd(), options.config) ||
       Comb.getCustomConfigPath();
@@ -117,8 +108,8 @@ function getConfig(options) {
   }
 
   if (!config) {
-    let message = `Error parsing configuration file ${configPath}.`;
-    process.stderr.write(format(message));
+    const errorMessage = Errors.configParsingError(configPath);
+    process.stderr.write(errorMessage);
     process.exit(1);
   }
 
@@ -129,26 +120,67 @@ function getConfig(options) {
   return config;
 }
 
-function detectConfig(file) {
-  var config = Comb.detectInFile(file);
-  config = JSON.stringify(config, false, 4);
-  process.stdout.write(config);
-  process.exit(0);
+function applyTemplate(config) {
+  if (!config.template) return;
+
+  if (!fs.existsSync(config.template)) {
+    const errorMessage = Errors.missingTemplateFile(config.template);
+    process.stderr.write(errorMessage);
+    process.exit(1);
+  }
+
+  var templateConfig = Comb.detectInFile(config.template);
+  for (var attrname in templateConfig) {
+    if (templateConfig.hasOwnProperty(attrname) && !config[attrname]) {
+      config[attrname] = templateConfig[attrname];
+    }
+  }
 }
 
-console.time('Time spent');
+function processFiles(files) {
+  const promises = files.map(file => {
+    return comb.processPath(file);
+  });
 
-var options = getOptions();
+  Promise.all(promises).catch(error => {
+    process.stderr.write(error.stack);
+    process.exit(1);
+  }).then(c => {
+    var tbchanged = c.filter(isChanged => {
+      return isChanged !== undefined;
+    }).reduce((a, b) => {
+      return a + b;
+    }, 0);
 
-if (options.detect) {
-  detectConfig(options.detect);
+    var changed = options.lint ? 0 : tbchanged;
+
+    if (options.verbose) {
+      let message = [
+          `${c.length} file${c.length === 1 ? '' : 's'} processed`,
+          `${changed} file${changed === 1 ? '' : 's'} fixed`,
+          ''
+          ].join('\n');
+      process.stdout.write(message);
+    }
+
+    if (options.lint && tbchanged) {
+      process.exit(1);
+    }
+
+    process.exit(0);
+  });
 }
 
-var config = getConfig(options);
-comb.configure(config);
+function processSTDIN() {
+  getInputData.then(processInputData);
+}
 
-if (process.stdin.isTTY) {
-  processFiles(options._, config);
-} else {
-  processSTDIN();
+function processInputData(input) {
+  comb.processString(input).catch(e => {
+    process.stderr.write(e.message);
+    process.exit(1);
+  }).then(output => {
+    process.stdout.write(output);
+    process.exit(0);
+  });
 }
